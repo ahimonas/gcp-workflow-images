@@ -1,0 +1,62 @@
+main:
+  params: [input]
+  steps:
+    - dump_file_content:
+        # Retrieves the raw binary content of the image file
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: ${input.data.bucket}
+          object: ${input.data.name}
+          alt: "media" # Essential to get the raw content, not just metadata
+        result: image_raw_data # This will hold the binary data of the image
+    - describe_image:
+        # Calls the subworkflow to ask Gemini to describe the image
+        call: describe_image_with_gemini
+        args:
+          imageData: ${image_raw_data}
+          contentType: ${input.data.contentType} # Pass the MIME type for Gemini
+        result: image_description
+    - return_result:
+        # Returns the final description of the image
+        return:
+          description: ${image_description}
+
+describe_image_with_gemini:
+  params: [imageData, contentType]
+  steps:
+    - init:
+        assign:
+          - project: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - location: "us-central1"
+          - model: "gemini-2.0-flash-001"
+          - description: ""
+    - call_gemini:
+        call: http.post
+        args:
+          url: ${"https://" + location + "-aiplatform.googleapis.com" + "/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/" + model + ":generateContent"}
+          auth:
+            type: OAuth2
+          body:
+            contents:
+              - role: user
+                parts:
+                  - text: "Describe the image concisely." # Prompt for image description
+                  - inline_data: # Corrected: 'inline_data' is the expected key
+                      mime_type: ${contentType} # e.g., "image/jpeg", "image/png"
+                      data: ${base64.encode(imageData)} # Base64 encode the binary image data
+            generation_config:
+              temperature: 0.2
+              maxOutputTokens: 2000
+              topK: 10
+              topP: 0.9
+        result: gemini_response
+    # Sometimes, there's no text, for example, due to safety settings
+    - check_text_exists:
+        switch:
+          - condition: ${not("parts" in gemini_response.body.candidates[0].content)}
+            next: return_description
+    - extract_text:
+        assign:
+          - description: ${gemini_response.body.candidates[0].content.parts[0].text}
+    - return_description:
+        return: ${description}
